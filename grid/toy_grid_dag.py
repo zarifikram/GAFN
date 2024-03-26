@@ -25,7 +25,7 @@ from itertools import chain
 
 parser = argparse.ArgumentParser()
 
-parser.add_argument("--device", default='cuda', type=str)
+parser.add_argument("--device", default='cpu', type=str)
 parser.add_argument("--progress", action='store_true')
 parser.add_argument("--seed", default=0, type=int)
 parser.add_argument("--tb_lr", default=0.001, help="Learning rate", type=float)
@@ -33,13 +33,13 @@ parser.add_argument("--tb_z_lr", default=0.1, help="Learning rate", type=float)
 parser.add_argument("--mbsize", default=16, help="Minibatch size", type=int)
 parser.add_argument("--n_hid", default=256, type=int)
 parser.add_argument("--n_layers", default=2, type=int)
-parser.add_argument("--n_train_steps", default=20000, type=int)
+parser.add_argument("--n_train_steps", default=2000, type=int)
 parser.add_argument("--horizon", default=8, type=int)
-parser.add_argument("--ndim", default=2, type=int)
-parser.add_argument("--augmented", default=0, type=int)
+parser.add_argument("--ndim", default=4, type=int)
+parser.add_argument("--augmented", default=1, type=int)
 parser.add_argument("--ri_eta", default=0.001, type=float)
 
-_dev = [torch.device('cuda')]
+_dev = [torch.device('cpu')]
 tf = lambda x: torch.FloatTensor(x).to(_dev[0])
 tl = lambda x: torch.LongTensor(x).to(_dev[0])
 
@@ -54,7 +54,7 @@ def func_corners(x, horizon, kind=None):
 
 class GridEnv:
     def __init__(self, horizon, ndim=2, xrange=[-1, 1], func=None):
-        assert args.ndim == 2
+        # assert args.ndim == 2
 
         self.horizon = horizon
         self.start = [xrange[0]] * ndim
@@ -215,8 +215,8 @@ class TBFlowNetAgent:
             with torch.no_grad():
                 pred = self.model(s)
 
-                z = torch.where(s > 0)[1].reshape(s.shape[0], -1)
-                z[:, 1] -= self.horizon
+                z = s.reshape(-1, self.ndim, self.horizon).argmax(-1)
+           
 
                 edge_mask = torch.cat([(z == self.horizon - 1).float(), torch.zeros((len(done) - sum(done), 1), device=self.dev)], 1)
                 logits = (pred[..., : self.ndim + 1] - inf * edge_mask).log_softmax(1)
@@ -233,8 +233,8 @@ class TBFlowNetAgent:
             for dat_idx, (curr_s, curr_a) in enumerate(zip(s, acts)):
                 env_idx = not_done_envs[dat_idx]
 
-                curr_formatted_s = torch.where(curr_s > 0)[0]
-                curr_formatted_s[1] -= self.horizon
+                curr_formatted_s = curr_s.reshape(self.ndim, self.horizon).argmax(-1)
+
 
                 batch_s[env_idx].append(curr_formatted_s)
                 batch_a[env_idx].append(curr_a.unsqueeze(-1))
@@ -250,8 +250,7 @@ class TBFlowNetAgent:
                 if d.item():
                     env_idx_return_map[env_idx] = r.item()
 
-                    formatted_ns = np.where(ns > 0)[0]
-                    formatted_ns[1] -= self.horizon
+                    formatted_ns = ns.reshape(self.ndim, self.horizon).argmax(-1)
 
                     batch_s[env_idx].append(tl(formatted_ns.tolist()))
 
@@ -292,10 +291,14 @@ class TBFlowNetAgent:
             if self.goal_found_map[goal] > 0:
                 modes_cnt += 1
 
+   
         return [batch_s, batch_a, batch_R, batch_steps, batch_next_s, batch_ri]
 
     def convert_states_to_onehot(self, states):
-        return torch.nn.functional.one_hot(states, self.horizon).view(states.shape[0], -1).float()
+        try:
+            return torch.nn.functional.one_hot(states, self.horizon).view(states.shape[0], -1).float()
+        except RuntimeError:
+            print(states)
 
     def learn_from(self, it, batch):
         inf = 1000000000
@@ -365,6 +368,7 @@ def main(args):
 
     all_visited = []
     for i in tqdm(range(args.n_train_steps + 1), disable=not args.progress):
+        print("step ", i, end="\r")
         data = agent.sample_many(args.mbsize, all_visited)
 
         loss = agent.learn_from(i, data)
